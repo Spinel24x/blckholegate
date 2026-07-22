@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-MasterDNS - نسخه Railway
-شروع ساده با فقط API
+MasterDNS - Railway Deployment
 """
 
 import uvicorn
 import logging
-import time
+import os
 from config import Config
 from dns_server import DNSResolver, DNSServer
 from api import create_api
@@ -29,7 +28,7 @@ if __name__ == "__main__":
         config.load_config()
         
         logger.info(f"Environment: {config.environment}")
-        logger.info(f"API Port: {config.api_port}")
+        logger.info(f"Port from Railway: {config.api_port}")
         logger.info(f"Railway Domain: {config.railway_domain}")
         
         # راه‌اندازی resolver و dns server
@@ -40,17 +39,17 @@ if __name__ == "__main__":
         api = create_api(dns_server, config)
         
         logger.info(f"✅ API ready at port {config.api_port}")
-        logger.info(f"📡 Health check: http://0.0.0.0:{config.api_port}/health")
-        logger.info(f"📚 API Docs: http://0.0.0.0:{config.api_port}/docs")
+        logger.info(f"📡 Health check: /health")
         
-        # شروع سرور
+        # شروع سرور با پورت Railway
         uvicorn.run(
             api,
             host="0.0.0.0",
-            port=config.api_port,
-            log_level=config.log_level.lower()
+            port=config.api_port,  # این از PORT میاد (8080)
+            log_level="info"
         )
         
     except Exception as e:
         logger.error(f"❌ Failed to start: {e}")
-        raise
+        import traceback
+        logger.error(traceback.format_exc())
