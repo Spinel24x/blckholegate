@@ -5,24 +5,31 @@ RUN apt-get update && apt-get install -y \
     gcc \
     python3-dev \
     libffi-dev \
-    dnsutils \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# ایجاد کاربر غیر-root
+RUN useradd -m -s /bin/bash appuser
+
 WORKDIR /app
 
-# کپی فایل‌های پروژه
+# کپی و نصب requirements
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# کپی بقیه فایل‌ها
 COPY . .
 
-# ایجاد دایرکتوری برای لاگ‌ها
-RUN mkdir -p /app/logs
+# ایجاد دایرکتوری‌های مورد نیاز
+RUN mkdir -p /app/logs /app/data
 
-# پورت‌های مورد نیاز
-EXPOSE 53/tcp
-EXPOSE 53/udp
+# تغییر مالکیت به کاربر غیر-root
+RUN chown -R appuser:appuser /app
+
+# تغییر به کاربر غیر-root
+USER appuser
+
+# پورت API
 EXPOSE 8000
 
 # اجرای اپلیکیشن
