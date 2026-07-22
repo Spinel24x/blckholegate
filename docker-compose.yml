@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  masterdns:
+    build: .
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+      - RAILWAY_PUBLIC_DOMAIN=localhost
+      - RAILWAY_SERVICE_NAME=masterdns
+      - DNS_PORT=53
+      - API_PORT=8000
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      - redis
+  
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
