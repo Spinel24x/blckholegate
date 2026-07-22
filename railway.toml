@@ -10,9 +10,9 @@ healthcheckTimeout = 120
 restartPolicyType = "ALWAYS"
 
 [service]
-port = 8000
+port = 8080
 
 [variables]
 ENVIRONMENT = "production"
-API_PORT = "8000"
+PORT = "8080"
 LOG_LEVEL = "INFO"
