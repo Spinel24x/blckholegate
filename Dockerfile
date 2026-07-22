@@ -29,8 +29,8 @@ RUN chown -R appuser:appuser /app
 # تغییر به کاربر غیر-root
 USER appuser
 
-# پورت API
-EXPOSE 8000
+# ⚠️ پورت 8080 (نه 8000)
+EXPOSE 8080
 
 # اجرای اپلیکیشن
 CMD ["python", "main.py"]
