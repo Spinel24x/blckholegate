@@ -6,16 +6,13 @@ dockerfilePath = "./Dockerfile"
 numReplicas = 1
 startCommand = "python main.py"
 healthcheckPath = "/health"
-healthcheckTimeout = 10
+healthcheckTimeout = 120
+restartPolicyType = "ALWAYS"
 
 [service]
 port = 8000
 
 [variables]
 ENVIRONMENT = "production"
-DNS_PORT = "53"
 API_PORT = "8000"
-CACHE_TTL = "300"
-RATE_LIMIT = "100"
-UPSTREAM_DNS = "8.8.8.8,1.1.1.1"
 LOG_LEVEL = "INFO"
