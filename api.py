@@ -1,35 +1,21 @@
 """
-MasterDNS - Full DoH Server
-پشتیبانی از تمام فرمت‌های DoH
+MasterDNS - Optimized for Intra/Slipnet/Nebulo
 """
 
-from fastapi import FastAPI, HTTPException, Request, Query
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel
 import time
 import logging
 import base64
 import dns.message
 import dns.rdatatype
-import dns.name
 
 logger = logging.getLogger(__name__)
 
-class DNSRequest(BaseModel):
-    domain: str
-    type: str = "A"
-
-class DomainRequest(BaseModel):
-    domain: str
-    description: str = ""
-
 def create_api(dns_server, config):
     
-    app = FastAPI(
-        title="MasterDNS DoH Server",
-        version="3.0.0"
-    )
+    app = FastAPI(title="MasterDNS DoH", version="4.0.0")
     
     app.add_middleware(
         CORSMiddleware,
@@ -39,213 +25,153 @@ def create_api(dns_server, config):
         allow_headers=["*"],
     )
     
-    @app.get("/")
-    async def root():
-        return {
-            "service": "MasterDNS DoH",
-            "version": "3.0.0",
-            "status": "running",
-            "doh_url": f"https://{config.railway_domain}/dns-query",
-            "test": f"https://{config.railway_domain}/dns-query?name=google.com"
-        }
-    
-    @app.get("/health")
-    async def health():
-        return {"status": "ok"}
-    
     # ============================================
-    # ENDPOINT اصلی DoH - قبول همه متدها
+    # Main DoH endpoint - همه چی رو قبول می‌کنه
     # ============================================
-    @app.api_route("/dns-query", methods=["GET", "POST", "PUT", "PATCH"])
-    async def doh_handler(request: Request):
+    @app.api_route("/dns-query", methods=["GET", "POST", "HEAD", "OPTIONS"])
+    async def doh_main(request: Request):
         """
-        Handler اصلی DoH
-        قبول GET و POST
-        پشتیبانی از:
-        - Google JSON format
-        - RFC 8484 wire format
-        - Cloudflare style
+        DoH endpoint اصلی
+        اگه پارامتر name باشه → Google JSON
+        اگه پارامتر dns باشه → Wire format
+        اگه POST با body باشه → Wire format raw
+        در غیر این صورت → صفحه راهنما
         """
         
-        # ============================================
-        # GET Request
-        # ============================================
+        # CORS preflight
+        if request.method == "OPTIONS":
+            return Response(status_code=200)
+        
+        # GET request
         if request.method == "GET":
             params = request.query_params
             
-            # 1. Google JSON style: ?name=domain.com&type=A
+            # Google JSON format
             if "name" in params:
-                return await google_json_resolve(
-                    name=params.get("name"),
-                    type=params.get("type", "A"),
-                    dns_server=dns_server
+                return google_dns(
+                    params.get("name", "google.com"),
+                    params.get("type", "A"),
+                    dns_server
                 )
             
-            # 2. RFC 8484 wire format: ?dns=base64string
+            # Wire format base64
             if "dns" in params:
-                return await rfc8484_wire_resolve(
-                    dns_b64=params.get("dns"),
-                    dns_server=dns_server
-                )
+                return wire_dns_b64(params.get("dns"), dns_server)
             
-            # 3. Cloudflare style: ?ct=application/dns-json&name=domain.com
-            ct = params.get("ct", "")
-            if "json" in ct and "name" in params:
-                return await google_json_resolve(
-                    name=params.get("name"),
-                    type=params.get("type", "A"),
-                    dns_server=dns_server
-                )
-            
-            # هیچ پارامتری نبود
-            return {
-                "error": "Missing parameters",
-                "usage": {
-                    "json_format": f"{request.url.scheme}://{request.url.netloc}/dns-query?name=google.com&type=A",
-                    "wire_format": f"{request.url.scheme}://{request.url.netloc}/dns-query?dns=BASE64",
-                    "curl_example": f"curl '{request.url.scheme}://{request.url.netloc}/dns-query?name=google.com'"
-                }
-            }
+            # اگر هیچ پارامتری نبود، یه تست برگردون
+            # این برای کلاینت‌هایی که اول تست می‌کنن
+            return google_dns("google.com", "A", dns_server)
         
-        # ============================================
-        # POST Request
-        # ============================================
-        elif request.method == "POST":
+        # POST request
+        if request.method == "POST":
             content_type = request.headers.get("content-type", "")
             
-            # 1. application/dns-message (RFC 8484 wire format)
+            # Wire format (application/dns-message)
             if "dns-message" in content_type:
                 body = await request.body()
-                return await rfc8484_raw_resolve(body, dns_server)
+                if body:
+                    return wire_dns_raw(body, dns_server)
             
-            # 2. application/json (Google JSON format)
-            elif "json" in content_type:
-                try:
-                    data = await request.json()
-                    name = data.get("name")
-                    if name:
-                        return await google_json_resolve(
-                            name=name,
-                            type=data.get("type", "A"),
-                            dns_server=dns_server
-                        )
-                except:
-                    pass
-            
-            # 3. application/x-www-form-urlencoded
-            elif "form" in content_type:
-                try:
-                    form = await request.form()
-                    name = form.get("name")
-                    if name:
-                        return await google_json_resolve(
-                            name=name,
-                            type=form.get("type", "A"),
-                            dns_server=dns_server
-                        )
-                    dns_param = form.get("dns")
-                    if dns_param:
-                        return await rfc8484_wire_resolve(dns_param, dns_server)
-                except:
-                    pass
-            
-            # 4. Raw body as DNS wire format
+            # Try JSON body
             try:
-                body = await request.body()
-                if body and len(body) > 12:  # Minimum DNS query size
-                    return await rfc8484_raw_resolve(body, dns_server)
+                body = await request.json()
+                if body:
+                    if "name" in body:
+                        return google_dns(
+                            body.get("name", "google.com"),
+                            body.get("type", "A"),
+                            dns_server
+                        )
+                    if "dns" in body:
+                        return wire_dns_b64(body["dns"], dns_server)
             except:
                 pass
             
-            # 5. Try JSON body anyway
+            # Try form data
             try:
-                data = await request.json()
-                name = data.get("name")
-                if name:
-                    return await google_json_resolve(
-                        name=name,
-                        type=data.get("type", "A"),
-                        dns_server=dns_server
+                form = await request.form()
+                if "name" in form:
+                    return google_dns(
+                        form.get("name", "google.com"),
+                        form.get("type", "A"),
+                        dns_server
                     )
             except:
                 pass
             
-            raise HTTPException(status_code=400, detail="Invalid POST request")
+            # Try raw body as DNS wire format
+            try:
+                body = await request.body()
+                if body and len(body) >= 12:
+                    return wire_dns_raw(body, dns_server)
+            except:
+                pass
+            
+            # Fallback - return test response
+            # بعضی کلاینت‌ها POST خالی می‌فرستن برای تست
+            return google_dns("google.com", "A", dns_server)
         
-        # ============================================
-        # Other methods - Try as GET
-        # ============================================
-        else:
-            params = request.query_params
-            if "name" in params:
-                return await google_json_resolve(
-                    name=params.get("name"),
-                    type=params.get("type", "A"),
-                    dns_server=dns_server
-                )
-            raise HTTPException(status_code=405, detail="Method not allowed")
+        # Fallback for any other method
+        return google_dns("google.com", "A", dns_server)
     
     # ============================================
-    # Endpoint ساده Google JSON
+    # Simple resolve (Google JSON format)
     # ============================================
-    @app.get("/resolve")
-    @app.post("/resolve")
-    async def simple_resolve(
-        request: Request,
-        name: str = Query(default=None),
-        type: str = Query(default="A")
-    ):
-        """Endpoint ساده برای Google JSON format"""
-        if not name:
-            # Try POST body
+    @app.api_route("/resolve", methods=["GET", "POST"])
+    async def simple_resolve(request: Request):
+        """Google JSON API compatible"""
+        
+        name = None
+        rtype = "A"
+        
+        if request.method == "GET":
+            name = request.query_params.get("name")
+            rtype = request.query_params.get("type", "A")
+        else:
             try:
                 data = await request.json()
                 name = data.get("name")
-                type = data.get("type", "A")
+                rtype = data.get("type", "A")
             except:
-                pass
+                try:
+                    form = await request.form()
+                    name = form.get("name")
+                    rtype = form.get("type", "A")
+                except:
+                    pass
         
         if not name:
-            raise HTTPException(status_code=400, detail="Missing 'name' parameter")
+            name = "google.com"
         
-        return await google_json_resolve(name=name, type=type, dns_server=dns_server)
+        return google_dns(name, rtype, dns_server)
     
     # ============================================
-    # Test page
+    # Health check
     # ============================================
-    @app.get("/test")
-    async def test_page():
+    @app.get("/health")
+    async def health():
+        return {"status": "ok"}
+    
+    @app.get("/")
+    async def root():
         return {
-            "test_urls": {
-                "json_format": "https://blckholegate-production.up.railway.app/dns-query?name=google.com&type=A",
-                "wire_format": "https://blckholegate-production.up.railway.app/dns-query?dns=AAABAAABAAAAAAAABmdvb2dsZQNjb20AAAEAAQ",
-                "simple": "https://blckholegate-production.up.railway.app/resolve?name=google.com"
-            },
-            "intra_settings": {
-                "server_url": "https://blckholegate-production.up.railway.app/dns-query",
-                "method": "GET"
-            }
+            "service": "MasterDNS DoH",
+            "doh_url": f"https://{config.railway_domain}/dns-query",
+            "status": "running"
         }
     
-    # ============================================
-    # Stats
-    # ============================================
     @app.get("/stats")
     async def stats():
         return {"queries": dns_server.stats.get("total_queries", 0)}
-    
-    @app.on_event("startup")
-    async def startup():
-        logger.info("🚀 MasterDNS DoH v3.0 ready")
     
     return app
 
 
 # ============================================
-# Google JSON Format Resolver
+# Google JSON DNS Resolver
 # ============================================
-async def google_json_resolve(name: str, type: str, dns_server):
-    """حل DNS به فرمت Google JSON"""
+def google_dns(name: str, rtype: str, dns_server):
+    """Resolve DNS and return Google JSON format"""
     try:
         domain = name.rstrip('.')
         
@@ -256,102 +182,74 @@ async def google_json_resolve(name: str, type: str, dns_server):
             "MX": dns.rdatatype.MX,
             "TXT": dns.rdatatype.TXT,
             "NS": dns.rdatatype.NS,
-            "SOA": dns.rdatatype.SOA,
         }
-        qtype = qtype_map.get(type.upper(), dns.rdatatype.A)
+        qtype = qtype_map.get(rtype.upper(), dns.rdatatype.A)
         
-        logger.info(f"Resolving: {domain} ({type})")
-        
-        # Use fresh resolver
         resolver = dns.resolver.Resolver()
         resolver.nameservers = ['8.8.8.8', '1.1.1.1']
         resolver.timeout = 5
         resolver.lifetime = 10
         
-        try:
-            answers = resolver.resolve(domain, qtype)
-            
-            answer_data = []
-            for rdata in answers:
-                answer_data.append({
-                    "name": f"{domain}.",
-                    "type": qtype,
-                    "TTL": answers.ttl,
-                    "data": str(rdata)
-                })
-            
-            dns_server.stats["total_queries"] = dns_server.stats.get("total_queries", 0) + 1
-            
-            return {
-                "Status": 0,
-                "TC": False,
-                "RD": True,
-                "RA": True,
-                "AD": False,
-                "CD": False,
-                "Question": [{"name": f"{domain}.", "type": qtype}],
-                "Answer": answer_data
-            }
-            
-        except dns.resolver.NXDOMAIN:
-            return {
-                "Status": 3,
-                "Question": [{"name": f"{domain}.", "type": qtype}]
-            }
-            
-        except Exception as e:
-            logger.error(f"DNS error: {e}")
-            return {
-                "Status": 2,
-                "Question": [{"name": f"{domain}.", "type": qtype}],
-                "Comment": f"DNS error: {str(e)}"
-            }
-            
-    except Exception as e:
-        logger.error(f"General error: {e}")
+        answers = resolver.resolve(domain, qtype)
+        
+        answer_list = []
+        for rdata in answers:
+            answer_list.append({
+                "name": f"{domain}.",
+                "type": qtype,
+                "TTL": answers.ttl,
+                "data": str(rdata)
+            })
+        
+        dns_server.stats["total_queries"] = dns_server.stats.get("total_queries", 0) + 1
+        
         return {
-            "Status": 2,
-            "Comment": f"Error: {str(e)}"
+            "Status": 0,
+            "TC": False,
+            "RD": True,
+            "RA": True,
+            "AD": False,
+            "CD": False,
+            "Question": [{"name": f"{domain}.", "type": qtype}],
+            "Answer": answer_list
         }
+        
+    except dns.resolver.NXDOMAIN:
+        return {"Status": 3, "Question": [{"name": f"{domain}.", "type": qtype}]}
+    except Exception as e:
+        return {"Status": 2, "Question": [{"name": f"{domain}.", "type": qtype}], "Comment": str(e)}
 
 
 # ============================================
-# RFC 8484 Wire Format Resolver
+# Wire Format DNS Resolver
 # ============================================
-async def rfc8484_wire_resolve(dns_b64: str, dns_server):
-    """حل DNS از base64 wire format"""
+def wire_dns_b64(dns_b64: str, dns_server):
+    """Resolve from base64 wire format"""
     try:
-        # Add padding
         padding = 4 - len(dns_b64) % 4
         if padding != 4:
             dns_b64 += '=' * padding
         
         wire = base64.urlsafe_b64decode(dns_b64)
-        query = dns.message.from_wire(wire)
-        domain = str(query.question[0].name).rstrip('.')
-        qtype = query.question[0].rdtype
-        
-        return await resolve_wire_format(domain, qtype, query, dns_server)
-        
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid DNS query: {e}")
+        return process_wire(wire, dns_server)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid base64")
 
 
-async def rfc8484_raw_resolve(body: bytes, dns_server):
-    """حل DNS از raw wire format"""
+def wire_dns_raw(body: bytes, dns_server):
+    """Resolve from raw wire format"""
     try:
-        query = dns.message.from_wire(body)
-        domain = str(query.question[0].name).rstrip('.')
-        qtype = query.question[0].rdtype
-        
-        return await resolve_wire_format(domain, qtype, query, dns_server)
-        
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid DNS message: {e}")
+        return process_wire(body, dns_server)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid DNS message")
 
 
-async def resolve_wire_format(domain: str, qtype: int, query, dns_server):
-    """حل و ساخت پاسخ wire format"""
+def process_wire(wire: bytes, dns_server):
+    """Process DNS wire format"""
+    query = dns.message.from_wire(wire)
+    domain = str(query.question[0].name).rstrip('.')
+    qtype = query.question[0].rdtype
+    
     response = dns.message.make_response(query)
     
     resolver = dns.resolver.Resolver()
@@ -364,12 +262,7 @@ async def resolve_wire_format(domain: str, qtype: int, query, dns_server):
         for answer in answers:
             response.answer.append(answer)
         dns_server.stats["total_queries"] = dns_server.stats.get("total_queries", 0) + 1
-    except dns.resolver.NXDOMAIN:
-        response.set_rcode(dns.rcode.NXDOMAIN)
-    except Exception:
+    except:
         response.set_rcode(dns.rcode.SERVFAIL)
     
-    return Response(
-        content=response.to_wire(),
-        media_type="application/dns-message"
-    )
+    return Response(content=response.to_wire(), media_type="application/dns-message")
